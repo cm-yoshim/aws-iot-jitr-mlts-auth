@@ -1,0 +1,116 @@
+== 本ドキュメントについて
+JITRの処理概要について記載します。
+
+== 概要
+JITRでデバイス証明書登録とThing作成を実現します。
+そのために、デバイスは合計3種類のリクエストをします。
+
+* 1.デバイス証明書登録
+** デバイス証明書登録&有効化
+** 1回目&2回目のリクエストの正常終了に必要なIoTPolicy(IoTポリシーA)をデバイス証明書にアタッチ
+* 2.Thing作成、権限調整
+** Thingを作成
+*** thingNameはデバイス側から送信
+** Thingとデバイス証明書を紐付け
+** デバイス証明書にアプリケーション用のIoTPolicy(IoTポリシーB)をアタッチ
+** デバイス証明書からIoTポリシーAをデタッチ
+* 3.確認
+** 2回目の処理が正常終了していることの確認
+*** IoTポリシーBがアタッチされていたら正常終了するメッセージ送信
+
+=== JITR
+
+[plantuml]
+----
+@startuml
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+title JITR
+box "デバイス" #dbebc4
+  participant "デバイス" as device
+end box
+box "AWS" #f8f8ff
+  participant "IoT Core" as iotCore
+  participant "Lambda" as lambda
+end box
+loop MQTTメッセージで正常終了するまでループ
+  device->iotCore: MQTTで「jitr/start」トピックに空メッセージをパブリッシュ
+  activate device
+  activate iotCore
+  alt デバイス証明書有効化、IoTポリシーのアタッチが完了している場合
+    iotCore-->device: 正常終了
+  end
+  iotCore-->device: 権限不足エラー
+  iotCore->iotCore: デバイス証明書の登録
+  iotCore->lambda: イベントの通知
+  deactivate iotCore
+  activate lambda
+  lambda->iotCore: デバイス証明書の有効化
+  activate iotCore
+  iotCore->lambda: 有効化OK
+  deactivate iotCore
+  lambda->iotCore: デバイス証明書にIoTポリシー（以降、IoTポリシーA）をアタッチ
+  activate iotCore
+  iotCore->lambda: アタッチOK
+  deactivate iotCore
+  note right
+    「IoTポリシーA」がアタッチされると、「本メッセージが正常終了」、「次の処理のリクエストメッセージの送信」ができるようになる
+  end note
+  deactivate lambda
+end
+device->device: デバイスごとに一意となるUUIDを生成
+device->iotCore: MQTTで「jitr/request」トピックにメッセージ(UUID)をパブリッシュ
+activate iotCore
+iotCore-->device: 正常終了
+note right
+  UUIDはthingNameとして利用します
+end note
+loop 「things/<UUID>/confirmation」トピックへのパブリッシュが正常終了する、もしくは指定した時間（1分くらい）ループ
+  device->iotCore: MQTTで「things/<UUID>/confirmation」トピックに空メッセージをパブリッシュ
+  alt デバイス証明書にアプリケーション用IoTポリシーがアタッチできていない場合
+    iotCore-->device: エラー
+  end
+  note right
+    今回の実装では、「things/<UUID>/*」ならどんなトピックでも大丈夫です
+  end note
+  iotCore->lambda: イベント通知
+  deactivate iotCore
+  activate lambda
+  lambda->iotCore: デバイス証明書に紐づくThingを取得
+  activate iotCore
+  iotCore->lambda: 取得OK
+  deactivate iotCore
+  alt 紐づくThingが存在する場合
+    lambda->lambda: バリデーションエラー
+    lambda->lambda: 後続処理を中断
+  end
+  lambda->iotCore: デバイス証明書のステータスを取得
+  activate iotCore
+  iotCore->lambda: 取得OK
+  deactivate iotCore
+  alt デバイス証明書のステータスが有効でない場合
+    lambda-->lambda: バリデーションエラー
+    lambda->lambda: 後続処理を中断
+  end
+  lambda->iotCore: Thingを作成（thingName=UUID）
+  activate iotCore
+  iotCore->lambda: 作成OK
+  deactivate iotCore
+  lambda->iotCore: Thingにデバイス証明書をアタッチ
+  activate iotCore
+  iotCore->lambda: アタッチOK
+  deactivate iotCore
+  lambda->iotCore: デバイス証明書ににアプリケーション用のIoTPolicyをアタッチ
+  activate iotCore
+  iotCore->lambda: アタッチOK
+  deactivate iotCore
+  lambda->iotCore: デバイス証明書から「IoTポリシーA」をデタッチ
+  activate iotCore
+  iotCore->lambda: アタッチOK
+  deactivate lambda
+  deactivate iotCore  
+end
+
+
+@enduml
+----
