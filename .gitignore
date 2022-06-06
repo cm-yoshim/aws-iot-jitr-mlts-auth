@@ -105,3 +105,6 @@ dist
 
 # CDK
 cdk/cdk.out/*
+
+# Mac
+.DS_Store
